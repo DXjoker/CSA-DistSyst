@@ -265,6 +265,7 @@ def Contingency_Screening(Para, hour):
     # Set parameters
     model.setParam("MIPGap", 0.001)
     model._c_line = c_line
+    model._y_line = y_line
     model._s_line = np.ones((Para.N_line, 2))
     model.Params.lazyConstraints = 1
     # Optimize
@@ -492,12 +493,23 @@ def Lazy_Constraint_Callback(model, where):
     if where == GRB.Callback.MIPSOL:
         # Get temperate solution
         c_line = model.cbGetSolution(model._c_line)
-        # Add lazy constraint
-        for i in range(Para.N_line):
-            if round(c_line.get(i)) == 1.0:
-                model.cbLazy(model._c_line[i] == 0)
-                model._s_line[i,0] = 0
-                break
+        y_line = model.cbGetSolution(model._y_line)
+        U = np.where(np.array(c_line.values()) == 1)[0]
+        V = np.where(np.array(y_line.values()) == 0)[0]
+        W = np.where(np.array(y_line.values()) == 1)[0]
+        # Add lazy constraint 1
+        expr = LinExpr()
+        for i in U:
+            expr = expr + model._c_line[i]
+            model._s_line[i,0] = 0
+        model.cbLazy(expr == 0)
+        # Add lazy constraint 2
+        expr = LinExpr()
+        for i in V:
+            expr = expr + model._y_line[i]
+        for i in W:
+            expr = expr - model._y_line[i] + 1
+        model.cbLazy(expr >= 1)
 
 # This function saves results in an Excel file
 #
