@@ -8,11 +8,9 @@
 
 import math
 import numpy as np
+import gurobipy as gp
 import openpyxl as pyxl
 import matplotlib.pyplot as plt
-
-from gurobipy import *
-from datetime import datetime
 
 
 # This class creates the parameter class
@@ -71,17 +69,17 @@ class Parameter(object):
     def var_index(self):
 
         # Fictitious power flow
-        # 1. Fictitious power flow
+        # 1. Name
         global N_F_line, N_F_sub , N_F_load, N_F_gen , N_F_var
         # 2. Initialization
         N_F_line = 0                       # flow of line
         N_F_load = N_F_line + self.N_line  # flow of load demand
         N_F_sub  = N_F_load + self.N_bus   # flow of substation
         N_F_gen  = N_F_sub  + self.N_sub   # flow of DG
-        N_F_var  = N_F_gen  + self.N_gen   # Number of all vaariables
+        N_F_var  = N_F_gen  + self.N_gen   # Number of all variables
 
         # Real power flow
-        # 1. Real power flow
+        # 1. Name
         global N_V_bus, N_I_line, N_P_line, N_Q_line, N_P_sub, N_Q_sub
         global N_S_gen, N_C_gen , N_P_cut , N_Q_cut , N_N_var
         # 2. Initialization
@@ -183,7 +181,7 @@ class Grapher(object):
         plt.axis('equal')
         plt.show()
 
-    # Bus
+    # Node
     def plot_node(self, Para):
         for n in range(Para.N_bus):
             plt.plot(Para.Bus[n,3], Para.Bus[n,4], 'b.')
@@ -235,14 +233,14 @@ class Result(object):
         return arr
 
 
-# This function defines a contingency screening model
+# This function defines the branch flow model
 # -----------------------------------------------------------------------------
 #
-def Branch_flow(Para, hour):
+def main_function(Para, hour):
     
     # Initialization
     # Import gurobi model
-    model = Model()
+    model = gp.Model()
 
     # Topology variables
     y_line = model.addVars(Para.N_line, vtype = "B")  # binary
@@ -254,15 +252,15 @@ def Branch_flow(Para, hour):
 
     # Build Models
     # Build the model
-    model = Reconf_Model(model, Para, y_line, f_flow)
-    model = Operat_Model(model, Para, y_line, v_flow, hour, obj)
+    model = Reconfig_Model(model, Para, y_line, f_flow)
+    model = DistFlow_Model(model, Para, y_line, v_flow, hour, obj)
 
     # Objective
-    model.setObjective(obj.sum('*'), GRB.MINIMIZE)
+    model.setObjective(obj.sum('*'), gp.GRB.MINIMIZE)
 
     # Optimization
     model.optimize()
-    if model.status == GRB.Status.OPTIMAL:
+    if model.status == gp.GRB.Status.OPTIMAL:
         sol = Result()
         sol.y_line = sol.get_value(model, y_line, "int")
         sol.f_flow = sol.get_value(model, f_flow, "float")
@@ -286,11 +284,11 @@ def Branch_flow(Para, hour):
 # This function defines the reconfiguration model
 # -----------------------------------------------------------------------------
 #
-def Reconf_Model(model, Para, y_line, f_flow):
+def Reconfig_Model(model, Para, y_line, f_flow):
     
     # Constraint
 
-    # 0. Fictitious power flow
+    # 1. Fictitious power flow
     for n in range(Para.N_line):
         model.addConstr(f_flow[N_F_line + n] >= -1e2 * y_line[n])
         model.addConstr(f_flow[N_F_line + n] <=  1e2 * y_line[n])
@@ -302,16 +300,16 @@ def Reconf_Model(model, Para, y_line, f_flow):
     for n in range(Para.N_gen):
         model.addConstr(f_flow[N_F_gen  + n] == -1)
 
-    # 1. Connectivity
+    # 2. Connectivity
     for n in range(Para.N_bus):
         # Bus-branch information
         line_head = Para.Line_head[n]
         line_tail = Para.Line_tail[n]
         # Formulate expression
-        expr = LinExpr()
+        expr = gp.LinExpr()
         expr = expr - f_flow[N_F_load + n]
-        expr = expr - quicksum(f_flow[N_F_line + i] for i in line_head)
-        expr = expr + quicksum(f_flow[N_F_line + i] for i in line_tail)
+        expr = expr - gp.quicksum(f_flow[N_F_line + i] for i in line_head)
+        expr = expr + gp.quicksum(f_flow[N_F_line + i] for i in line_tail)
         if n in Para.Sub[:,1]:
             i = int(np.where(n == Para.Sub[:,1])[0])
             expr = expr + f_flow[N_F_sub + i]
@@ -320,8 +318,8 @@ def Reconf_Model(model, Para, y_line, f_flow):
             expr = expr + f_flow[N_F_gen + i]
         model.addConstr(expr == 0)
     
-    # 2. Radial topology
-    model.addConstr(quicksum(y_line) == Para.N_bus - Para.N_sub)
+    # 3. Radial topology
+    model.addConstr(gp.quicksum(y_line) == Para.N_bus - Para.N_sub)
     
     # Return
     return model
@@ -330,10 +328,10 @@ def Reconf_Model(model, Para, y_line, f_flow):
 # This function defines the operation model
 # -----------------------------------------------------------------------------
 #
-def Operat_Model(model, Para, y_line, v_flow, hour, obj):
+def DistFlow_Model(model, Para, y_line, v_flow, hour, obj):
     
     # Objective
-    opr = LinExpr()
+    opr = gp.LinExpr()
     for n in range(Para.N_line):
         opr = opr + v_flow[N_I_line + n] * Para.Cost_los
     for n in range(Para.N_sub):  # power purchasing
@@ -346,15 +344,15 @@ def Operat_Model(model, Para, y_line, v_flow, hour, obj):
     model.addConstr(obj[0] == opr)
     
     # Constraint
-    # 0. Nodal active power balance
+    # 1. Nodal active power balance
     for n in range(Para.N_bus):
         # Bus-Line information
         line_head = Para.Line_head[n]
         line_tail = Para.Line_tail[n]
         # Formulate expression
-        expr = LinExpr()
-        expr = expr - quicksum(v_flow[N_P_line + i] for i in line_head)
-        expr = expr + quicksum(v_flow[N_P_line + i] for i in line_tail)
+        expr = gp.LinExpr()
+        expr = expr - gp.quicksum(v_flow[N_P_line + i] for i in line_head)
+        expr = expr + gp.quicksum(v_flow[N_P_line + i] for i in line_tail)
         expr = expr + v_flow[N_P_cut + n]
         for i in line_tail:
             expr = expr - v_flow[N_I_line + i] * Para.Line[i,4]
@@ -366,15 +364,15 @@ def Operat_Model(model, Para, y_line, v_flow, hour, obj):
             expr = expr + v_flow[N_S_gen + i] * math.cos(Para.Factor)
         model.addConstr(expr == Para.Bus[n,1] * Para.Day[hour,1])
     
-    # 1. Nodal reactive power balance
+    # 2. Nodal reactive power balance
     for n in range(Para.N_bus):
         # Bus-Line information
         line_head = Para.Line_head[n]
         line_tail = Para.Line_tail[n]
         # Formulate expression
-        expr = LinExpr()
-        expr = expr - quicksum(v_flow[N_Q_line + i] for i in line_head)
-        expr = expr + quicksum(v_flow[N_Q_line + i] for i in line_tail)
+        expr = gp.LinExpr()
+        expr = expr - gp.quicksum(v_flow[N_Q_line + i] for i in line_head)
+        expr = expr + gp.quicksum(v_flow[N_Q_line + i] for i in line_tail)
         expr = expr + v_flow[N_Q_cut + n]
         for i in line_tail:
             expr = expr - v_flow[N_I_line + i] * Para.Line[i,5]
@@ -386,12 +384,12 @@ def Operat_Model(model, Para, y_line, v_flow, hour, obj):
             expr = expr + v_flow[N_S_gen + i] * math.sin(Para.Factor)
         model.addConstr(expr == Para.Bus[n,2] * Para.Day[hour,1])
     
-    # 2. Branch flow equation
+    # 3. Branch flow equation
     for n in range(Para.N_line):
         bus_head = Para.Line[n,1]
         bus_tail = Para.Line[n,2]
         # Formulate expression
-        expr = LinExpr()
+        expr = gp.LinExpr()
         expr = expr + v_flow[N_V_bus + bus_head] - v_flow[N_V_bus + bus_tail]
         expr = expr - v_flow[N_P_line + n] * Para.Line[n,4] * 2
         expr = expr - v_flow[N_Q_line + n] * Para.Line[n,5] * 2
@@ -400,7 +398,7 @@ def Operat_Model(model, Para, y_line, v_flow, hour, obj):
         model.addConstr(expr >= -Para.Big_M * (1 - y_line[n]))
         model.addConstr(expr <=  Para.Big_M * (1 - y_line[n]))
     
-    # 3. Second order conic constraint
+    # 4. Second order conic constraint
     for n in range(Para.N_line):
         ep_0 = v_flow[N_P_line + n] * 2
         ep_1 = v_flow[N_Q_line + n] * 2
@@ -408,24 +406,25 @@ def Operat_Model(model, Para, y_line, v_flow, hour, obj):
         ep_3 = v_flow[N_I_line + n] + v_flow[N_V_bus + Para.Line[n,1]]
         model.addConstr(ep_0 * ep_0 + ep_1 * ep_1 + ep_2 * ep_2 <= ep_3 * ep_3)
     
-    # 4. Renewables generation
+    # 5. Renewables generation
     for n in range(Para.N_gen):
-        expr = LinExpr()
+        expr = gp.LinExpr()
         expr = expr + v_flow[N_S_gen + n]
         expr = expr + v_flow[N_C_gen + n]
         G_type = int(Para.Gen[n,4])
         model.addConstr(expr == Para.Gen[n,2] * Para.Day[hour, G_type + 2])
     
-    # 5. Lower and Upper bound
+    # 6. Lower and Upper bound
     # 1) voltage amplitutde
     for n in range(Para.N_bus):
         model.addConstr(v_flow[N_V_bus  + n] >= Para.V_min)
         model.addConstr(v_flow[N_V_bus  + n] <= Para.V_max)
     # 2) line current
     for n in range(Para.N_line):
+        smax = (Para.Line[n,3] / Para.Base_V) ** 2
         model.addConstr(v_flow[N_I_line + n] >=  0)
         model.addConstr(v_flow[N_I_line + n] <=  y_line[n] * Para.Big_M)
-        model.addConstr(v_flow[N_I_line + n] <=  (Para.Line[n,3] / Para.Base_V) ** 2)
+        model.addConstr(v_flow[N_I_line + n] <=  smax)
     # 3) line flow
     for n in range(Para.N_line):
         smax = Para.Line[n,3]
@@ -472,10 +471,10 @@ if __name__ == "__main__":
 
     Para = Parameter("data/Data-IEEE-33.xlsx")
     tool = Excel_tool()
-    hour = 12
+    hour = 12  # choose 12 a.m.
 
     # Optimize
-    sol  = Branch_flow(Para, hour)
+    sol  = main_function(Para, hour)
 
     # Output
     var_list = [
@@ -491,3 +490,4 @@ if __name__ == "__main__":
     # Grapher
     fig  = Grapher(Para)
     fig.figure(Para, sol)
+
